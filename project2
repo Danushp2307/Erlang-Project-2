@@ -1,7 +1,20 @@
 #!/usr/bin/env escript
 %% -*- erlang -*-
-%%! -pa .
 
 main(Args) ->
+    ScriptDir = filename:dirname(escript:script_name()),
+    ErlFile = filename:join(ScriptDir, "project2.erl"),
+    BeamFile = filename:join(ScriptDir, "project2.beam"),
+    case filelib:is_file(BeamFile) of
+        true ->
+            code:add_patha(ScriptDir);
+        false ->
+            case compile:file(ErlFile, [binary]) of
+                {ok, Mod, Bin} ->
+                    code:load_binary(Mod, ErlFile, Bin);
+                Error ->
+                    io:format("Compilation error: ~p~n", [Error]),
+                    halt(1)
+            end
+    end,
     project2:main(Args).
-

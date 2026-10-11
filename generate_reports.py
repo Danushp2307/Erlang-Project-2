@@ -158,6 +158,7 @@ def build_main_report():
 
     meta_text = "<b>Course:</b> COP5612 Distributed Operating System Principles (Fall 2026)<br/>" \
                 "<b>Instructor:</b> Prof. Alin Dobra<br/>" \
+                "<b>Team Members:</b> Danush (Contact via eLearning / Course Portal)<br/>" \
                 "<b>Submission:</b> Project 2 Technical Report & Empirical Convergence Study"
     story.append(Paragraph(meta_text, body_style))
     story.append(Spacer(1, 10))
@@ -472,6 +473,8 @@ def build_bonus_report():
     story.append(HRFlowable(width="100%", thickness=2, color=colors.HexColor('#0b2545'), spaceAfter=10))
 
     meta_text = "<b>Course:</b> COP5612 Distributed Operating System Principles (Fall 2026)<br/>" \
+                "<b>Instructor:</b> Prof. Alin Dobra<br/>" \
+                "<b>Team Members:</b> Danush (Contact via eLearning / Course Portal)<br/>" \
                 "<b>Bonus Component:</b> Node Crash & Transient Link Failure Models (30% Credit)<br/>" \
                 "<b>Analysis:</b> Percolation Thresholds, Small-World Shortcut Fault-Resilience, and Epidemic Self-Healing"
     story.append(Paragraph(meta_text, body_style))

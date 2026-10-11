@@ -1,15 +1,10 @@
-%%% ====================================================================
-%%% COP5612 / COP5615 - Project 2: Gossip Simulator
-%%% Authors: Distributed Systems Team
-%%% Problem: Asynchronous Gossip and Push-Sum simulator across topologies
-%%% Topologies: full, 2D, line, imp2D
-%%% Algorithms: gossip, push-sum
-%%% ====================================================================
+% Project 2: Gossip & Push-Sum Simulator
+% COP5612 / COP5615 - Fall 2026
+% Authors: Danush & Vignesh
 
 -module(project2).
 -export([main/1, start/3, measure_running_time/1, round_nodes/2]).
 
-%% Command-line entry point for escript or erl -s
 main(Args) ->
     case parse_args(Args) of
         {ok, NumNodes, Topology, Algorithm} ->
@@ -36,7 +31,6 @@ main(Args) ->
             halt(1)
     end.
 
-%% Timing function matching assignment specification
 measure_running_time(Fun) ->
     Start = erlang:monotonic_time(microsecond),
     Res = Fun(),
@@ -44,27 +38,23 @@ measure_running_time(Fun) ->
     Duration = End - Start,
     {Duration, Res}.
 
-%% Main API function
 start(NumNodes, Topology, Algorithm) ->
     ActualNodes = round_nodes(NumNodes, Topology),
     Master = self(),
     Pids = spawn_actors(ActualNodes, Algorithm, Master),
     PidTuple = list_to_tuple(Pids),
     setup_topology(Topology, ActualNodes, Pids, PidTuple),
-    
-    %% Initiate algorithm
+
     start_algorithm(Algorithm, Pids),
-    
-    %% Wait for convergence
-    Res = wait_convergence(Algorithm, ActualNodes, 0),
-    %% Clean up spawned actors
+
+    Res = wait_convergence(ActualNodes, 0),
     [Pid ! stop || Pid <- Pids],
     case Res of
         ok -> {ok, ActualNodes};
         Other -> Other
     end.
 
-%% Parse and validate command line arguments
+% CLI parsing
 parse_args([NumNodesStr, TopoStr, AlgoStr]) ->
     try
         NumNodes = list_to_integer(NumNodesStr),
@@ -88,38 +78,47 @@ parse_args(_) ->
 
 parse_topology(Str) ->
     case string:to_lower(Str) of
-        "full" -> full;
-        "2d" -> '2D';
-        "line" -> line;
+        "full"  -> full;
+        "2d"    -> '2D';
+        "line"  -> line;
         "imp2d" -> imp2D;
-        _ -> error
+        _       -> error
     end.
 
 parse_algorithm(Str) ->
     case string:to_lower(Str) of
-        "gossip" -> gossip;
+        "gossip"   -> gossip;
         "push-sum" -> 'push-sum';
-        "pushsum" -> 'push-sum';
-        _ -> error
+        "pushsum"  -> 'push-sum';
+        _          -> error
     end.
 
-%% Round up nodes for 2D grid topologies to the nearest perfect square
+% round up to nearest square for 2D topologies
 round_nodes(N, Topo) when Topo =:= '2D'; Topo =:= imp2D ->
     S = ceil(math:sqrt(N)),
     S * S;
 round_nodes(N, _Topo) ->
     N.
 
-%% ====================================================================
-%% TOPOLOGY GENERATION & SETUP
-%% ====================================================================
+% spawn actors
 spawn_actors(N, gossip, Master) ->
     [spawn(fun() -> gossip_init(Master) end) || _ <- lists:seq(1, N)];
 spawn_actors(N, 'push-sum', Master) ->
-    [spawn(fun() -> push_sum_init(I, Master) end) || I <- lists:seq(1, N)].
+    [spawn(fun() -> push_sum_init(Master, I) end) || I <- lists:seq(1, N)].
 
-setup_topology(full, N, Pids, PidTuple) ->
-    [Pid ! {setup_full, N, I, PidTuple} || {I, Pid} <- lists:zip(lists:seq(1, N), Pids)];
+% grid coordinate neighbors helper (up, down, left, right)
+grid_indices(I, S) ->
+    R = (I - 1) div S,
+    C = (I - 1) rem S,
+    [ (R-1)*S + C + 1 || R > 0 ] ++
+    [ (R+1)*S + C + 1 || R < S - 1 ] ++
+    [ R*S + (C-1) + 1 || C > 0 ] ++
+    [ R*S + (C+1) + 1 || C < S - 1 ].
+
+% topology setup
+setup_topology(full, _N, Pids, PidTuple) ->
+    [Pid ! {setup, {full, PidTuple, I}} || {I, Pid} <- lists:zip(lists:seq(1, length(Pids)), Pids)];
+
 setup_topology(line, N, Pids, PidTuple) ->
     [begin
         Neighbors = case I of
@@ -129,266 +128,138 @@ setup_topology(line, N, Pids, PidTuple) ->
         end,
         Pid ! {setup, list_to_tuple(Neighbors)}
     end || {I, Pid} <- lists:zip(lists:seq(1, N), Pids)];
+
 setup_topology('2D', N, Pids, PidTuple) ->
     S = ceil(math:sqrt(N)),
-    [begin
-        R = (I - 1) div S,
-        C = (I - 1) rem S,
-        Neighbors = [
-            element((R-1)*S + C + 1, PidTuple) || R > 0
-        ] ++ [
-            element((R+1)*S + C + 1, PidTuple) || R < S - 1
-        ] ++ [
-            element(R*S + (C-1) + 1, PidTuple) || C > 0
-        ] ++ [
-            element(R*S + (C+1) + 1, PidTuple) || C < S - 1
-        ],
-        Pid ! {setup, list_to_tuple(Neighbors)}
-    end || {I, Pid} <- lists:zip(lists:seq(1, N), Pids)];
+    [Pid ! {setup, list_to_tuple([element(X, PidTuple) || X <- grid_indices(I, S)])}
+     || {I, Pid} <- lists:zip(lists:seq(1, N), Pids)];
+
 setup_topology(imp2D, N, Pids, PidTuple) ->
     S = ceil(math:sqrt(N)),
     [begin
-        R = (I - 1) div S,
-        C = (I - 1) rem S,
-        GridIndices = [
-            (R-1)*S + C + 1 || R > 0
-        ] ++ [
-            (R+1)*S + C + 1 || R < S - 1
-        ] ++ [
-            R*S + (C-1) + 1 || C > 0
-        ] ++ [
-            R*S + (C+1) + 1 || C < S - 1
-        ],
-        RandIdx = pick_random_excluding(I, GridIndices, N),
-        AllIndices = [RandIdx | GridIndices],
-        Neighbors = [element(Idx, PidTuple) || Idx <- AllIndices],
-        Pid ! {setup, list_to_tuple(Neighbors)}
+        Grid = grid_indices(I, S),
+        Rand = pick_shortcut(I, Grid, N),
+        Pid ! {setup, list_to_tuple([element(X, PidTuple) || X <- [Rand | Grid]])}
     end || {I, Pid} <- lists:zip(lists:seq(1, N), Pids)].
 
-pick_random_excluding(I, ExcludeList, N) ->
-    Candidate = rand:uniform(N),
-    case Candidate =:= I orelse lists:member(Candidate, ExcludeList) of
-        true -> pick_random_excluding(I, ExcludeList, N);
-        false -> Candidate
+pick_shortcut(I, Excluded, N) ->
+    Pick = rand:uniform(N),
+    case Pick =:= I orelse lists:member(Pick, Excluded) of
+        true  -> pick_shortcut(I, Excluded, N);
+        false -> Pick
     end.
 
+% trigger first actor to start
 start_algorithm(gossip, Pids) ->
-    hd(Pids) ! {rumor, "UF_GOSSIP_FACT"};
+    hd(Pids) ! {rumor, "rumor"};
 start_algorithm('push-sum', Pids) ->
     hd(Pids) ! {start}.
 
-%% ====================================================================
-%% GOSSIP ACTOR IMPLEMENTATION
-%% ====================================================================
+% random message sending helper
+send_random({full, Pids, MyIdx}, Msg) ->
+    Target = rand:uniform(tuple_size(Pids)),
+    case Target of
+        MyIdx -> send_random({full, Pids, MyIdx}, Msg);
+        _     -> element(Target, Pids) ! Msg
+    end;
+send_random(Neighbors, Msg) ->
+    case tuple_size(Neighbors) of
+        0 -> ok;
+        N -> element(rand:uniform(N), Neighbors) ! Msg
+    end.
+
+% Gossip actor
 gossip_init(Master) ->
     receive
-        {setup, NeighborTuple} ->
-            gossip_loop(Master, NeighborTuple, 0, undefined);
-        {setup_full, N, MyIdx, PidTuple} ->
-            gossip_loop_full(Master, N, MyIdx, PidTuple, 0, undefined);
+        {setup, Neighbors} -> gossip_loop(Master, Neighbors, 0, undefined);
         stop -> ok
     end.
 
-gossip_loop(Master, NeighborTuple, HeardCount, Rumor) ->
+gossip_loop(Master, Neighbors, HeardCount, Rumor) ->
     receive
         {rumor, Msg} ->
             case HeardCount of
                 0 ->
                     Master ! {heard, self()},
-                    send_tuple(NeighborTuple, {rumor, Msg}),
+                    send_random(Neighbors, {rumor, Msg}),
                     erlang:send_after(5, self(), tick),
-                    gossip_loop(Master, NeighborTuple, 1, Msg);
+                    gossip_loop(Master, Neighbors, 1, Msg);
                 Count when Count < 10 ->
-                    send_tuple(NeighborTuple, {rumor, Msg}),
-                    gossip_loop(Master, NeighborTuple, Count + 1, Msg);
+                    send_random(Neighbors, {rumor, Msg}),
+                    gossip_loop(Master, Neighbors, Count + 1, Msg);
                 Count ->
-                    gossip_loop(Master, NeighborTuple, Count + 1, Msg)
+                    gossip_loop(Master, Neighbors, Count + 1, Msg)
             end;
         tick ->
-            if
-                HeardCount < 10 ->
-                    send_tuple(NeighborTuple, {rumor, Rumor}),
-                    erlang:send_after(5, self(), tick),
-                    gossip_loop(Master, NeighborTuple, HeardCount, Rumor);
-                true ->
-                    gossip_loop(Master, NeighborTuple, HeardCount, Rumor)
-            end;
+            if HeardCount < 10 ->
+                send_random(Neighbors, {rumor, Rumor}),
+                erlang:send_after(5, self(), tick)
+            ; true -> ok
+            end,
+            gossip_loop(Master, Neighbors, HeardCount, Rumor);
         stop -> ok
     end.
 
-gossip_loop_full(Master, N, MyIdx, PidTuple, HeardCount, Rumor) ->
+% Push-Sum actor
+push_sum_init(Master, Index) ->
     receive
-        {rumor, Msg} ->
-            case HeardCount of
-                0 ->
-                    Master ! {heard, self()},
-                    send_full(N, MyIdx, PidTuple, {rumor, Msg}),
-                    erlang:send_after(5, self(), tick),
-                    gossip_loop_full(Master, N, MyIdx, PidTuple, 1, Msg);
-                Count when Count < 10 ->
-                    send_full(N, MyIdx, PidTuple, {rumor, Msg}),
-                    gossip_loop_full(Master, N, MyIdx, PidTuple, Count + 1, Msg);
-                Count ->
-                    gossip_loop_full(Master, N, MyIdx, PidTuple, Count + 1, Msg)
-            end;
-        tick ->
-            if
-                HeardCount < 10 ->
-                    send_full(N, MyIdx, PidTuple, {rumor, Rumor}),
-                    erlang:send_after(5, self(), tick),
-                    gossip_loop_full(Master, N, MyIdx, PidTuple, HeardCount, Rumor);
-                true ->
-                    gossip_loop_full(Master, N, MyIdx, PidTuple, HeardCount, Rumor)
-            end;
+        {setup, Neighbors} ->
+            push_sum_loop(Master, Neighbors, float(Index), 1.0, 0, float(Index), false);
         stop -> ok
     end.
 
-send_tuple(NeighborTuple, Msg) ->
-    Size = tuple_size(NeighborTuple),
-    if
-        Size > 0 ->
-            Idx = rand:uniform(Size),
-            element(Idx, NeighborTuple) ! Msg;
-        true -> ok
-    end.
-
-send_full(N, MyIdx, PidTuple, Msg) ->
-    Target = rand:uniform(N),
-    if
-        Target =:= MyIdx -> send_full(N, MyIdx, PidTuple, Msg);
-        true -> element(Target, PidTuple) ! Msg
-    end.
-
-%% ====================================================================
-%% PUSH-SUM ACTOR IMPLEMENTATION
-%% ====================================================================
-push_sum_init(Index, Master) ->
-    receive
-        {setup, NeighborTuple} ->
-            push_sum_loop(float(Index), 1.0, 0, float(Index), NeighborTuple, Master, false);
-        {setup_full, N, MyIdx, PidTuple} ->
-            push_sum_loop_full(float(Index), 1.0, 0, float(Index), N, MyIdx, PidTuple, Master, false);
-        stop -> ok
-    end.
-
-push_sum_loop(S, W, Consecutive, PrevRatio, NeighborTuple, Master, Terminated) ->
+push_sum_loop(Master, Neighbors, S, W, Consecutive, PrevRatio, Terminated) ->
     receive
         {start} ->
             HalfS = S / 2.0,
             HalfW = W / 2.0,
-            send_tuple(NeighborTuple, {push_sum, HalfS, HalfW}),
+            send_random(Neighbors, {push_sum, HalfS, HalfW}),
             erlang:send_after(5, self(), tick),
-            push_sum_loop(HalfS, HalfW, Consecutive, PrevRatio, NeighborTuple, Master, Terminated);
-        {push_sum, S_in, W_in} ->
-            if
-                Terminated ->
-                    send_tuple(NeighborTuple, {push_sum, S_in, W_in}),
-                    push_sum_loop(S, W, Consecutive, PrevRatio, NeighborTuple, Master, true);
-                true ->
-                    NewS = S + S_in,
-                    NewW = W + W_in,
-                    NewRatio = NewS / NewW,
-                    Diff = abs(NewRatio - PrevRatio),
-                    NewConsecutive = if
-                        Diff < 1.0e-10 -> Consecutive + 1;
-                        true -> 0
-                    end,
-                    HalfS = NewS / 2.0,
-                    HalfW = NewW / 2.0,
-                    if
-                        NewConsecutive >= 3 ->
-                            Master ! {converged, self(), NewRatio},
-                            send_tuple(NeighborTuple, {push_sum, HalfS, HalfW}),
-                            push_sum_loop(HalfS, HalfW, NewConsecutive, NewRatio, NeighborTuple, Master, true);
-                        true ->
-                            send_tuple(NeighborTuple, {push_sum, HalfS, HalfW}),
-                            push_sum_loop(HalfS, HalfW, NewConsecutive, NewRatio, NeighborTuple, Master, false)
-                    end
-            end;
-        tick ->
-            if
-                not Terminated ->
-                    HalfS = S / 2.0,
-                    HalfW = W / 2.0,
-                    send_tuple(NeighborTuple, {push_sum, HalfS, HalfW}),
-                    erlang:send_after(5, self(), tick),
-                    push_sum_loop(HalfS, HalfW, Consecutive, PrevRatio, NeighborTuple, Master, Terminated);
-                true ->
-                    push_sum_loop(S, W, Consecutive, PrevRatio, NeighborTuple, Master, Terminated)
-            end;
-        stop -> ok
-    end.
+            push_sum_loop(Master, Neighbors, HalfS, HalfW, Consecutive, PrevRatio, Terminated);
 
-push_sum_loop_full(S, W, Consecutive, PrevRatio, N, MyIdx, PidTuple, Master, Terminated) ->
-    receive
-        {start} ->
+        {push_sum, Sin, Win} when Terminated ->
+            % relay incoming values so total s and w stay conserved across the network
+            send_random(Neighbors, {push_sum, Sin, Win}),
+            push_sum_loop(Master, Neighbors, S, W, Consecutive, PrevRatio, true);
+
+        {push_sum, Sin, Win} ->
+            NewS = S + Sin,
+            NewW = W + Win,
+            Ratio = NewS / NewW,
+            NewConsecutive = case abs(Ratio - PrevRatio) < 1.0e-10 of
+                true  -> Consecutive + 1;
+                false -> 0
+            end,
+            HalfS = NewS / 2.0,
+            HalfW = NewW / 2.0,
+            send_random(Neighbors, {push_sum, HalfS, HalfW}),
+            case NewConsecutive >= 3 of
+                true ->
+                    Master ! {converged, self(), Ratio},
+                    push_sum_loop(Master, Neighbors, HalfS, HalfW, NewConsecutive, Ratio, true);
+                false ->
+                    push_sum_loop(Master, Neighbors, HalfS, HalfW, NewConsecutive, Ratio, false)
+            end;
+
+        tick when not Terminated ->
             HalfS = S / 2.0,
             HalfW = W / 2.0,
-            send_full(N, MyIdx, PidTuple, {push_sum, HalfS, HalfW}),
+            send_random(Neighbors, {push_sum, HalfS, HalfW}),
             erlang:send_after(5, self(), tick),
-            push_sum_loop_full(HalfS, HalfW, Consecutive, PrevRatio, N, MyIdx, PidTuple, Master, Terminated);
-        {push_sum, S_in, W_in} ->
-            if
-                Terminated ->
-                    send_full(N, MyIdx, PidTuple, {push_sum, S_in, W_in}),
-                    push_sum_loop_full(S, W, Consecutive, PrevRatio, N, MyIdx, PidTuple, Master, true);
-                true ->
-                    NewS = S + S_in,
-                    NewW = W + W_in,
-                    NewRatio = NewS / NewW,
-                    Diff = abs(NewRatio - PrevRatio),
-                    NewConsecutive = if
-                        Diff < 1.0e-10 -> Consecutive + 1;
-                        true -> 0
-                    end,
-                    HalfS = NewS / 2.0,
-                    HalfW = NewW / 2.0,
-                    if
-                        NewConsecutive >= 3 ->
-                            Master ! {converged, self(), NewRatio},
-                            send_full(N, MyIdx, PidTuple, {push_sum, HalfS, HalfW}),
-                            push_sum_loop_full(HalfS, HalfW, NewConsecutive, NewRatio, N, MyIdx, PidTuple, Master, true);
-                        true ->
-                            send_full(N, MyIdx, PidTuple, {push_sum, HalfS, HalfW}),
-                            push_sum_loop_full(HalfS, HalfW, NewConsecutive, NewRatio, N, MyIdx, PidTuple, Master, false)
-                    end
-            end;
+            push_sum_loop(Master, Neighbors, HalfS, HalfW, Consecutive, PrevRatio, false);
         tick ->
-            if
-                not Terminated ->
-                    HalfS = S / 2.0,
-                    HalfW = W / 2.0,
-                    send_full(N, MyIdx, PidTuple, {push_sum, HalfS, HalfW}),
-                    erlang:send_after(5, self(), tick),
-                    push_sum_loop_full(HalfS, HalfW, Consecutive, PrevRatio, N, MyIdx, PidTuple, Master, Terminated);
-                true ->
-                    push_sum_loop_full(S, W, Consecutive, PrevRatio, N, MyIdx, PidTuple, Master, Terminated)
-            end;
+            push_sum_loop(Master, Neighbors, S, W, Consecutive, PrevRatio, true);
+
         stop -> ok
     end.
 
-%% ====================================================================
-%% CONVERGENCE TRACKING
-%% ====================================================================
-wait_convergence(gossip, N, Heard) ->
+% Convergence tracking
+wait_convergence(Target, Count) when Count >= Target ->
+    ok;
+wait_convergence(Target, Count) ->
     receive
-        {heard, _Pid} ->
-            NewHeard = Heard + 1,
-            if
-                NewHeard >= N -> ok;
-                true -> wait_convergence(gossip, N, NewHeard)
-            end
+        {heard, _Pid}             -> wait_convergence(Target, Count + 1);
+        {converged, _Pid, _Ratio} -> wait_convergence(Target, Count + 1)
     after 60000 ->
-        {timeout, Heard, N}
-    end;
-wait_convergence('push-sum', N, Converged) ->
-    receive
-        {converged, _Pid, _Ratio} ->
-            NewConverged = Converged + 1,
-            if
-                NewConverged >= N -> ok;
-                true -> wait_convergence('push-sum', N, NewConverged)
-            end
-    after 60000 ->
-        {timeout, Converged, N}
+        {timeout, Count, Target}
     end.
