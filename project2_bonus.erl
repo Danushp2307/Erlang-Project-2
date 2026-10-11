@@ -1,14 +1,6 @@
-%%% ====================================================================
-%%% COP5612 / COP5615 - Project 2 Bonus: Gossip Simulator with Failures
-%%% Authors: Distributed Systems Team
-%%% Problem: Fault-tolerant Asynchronous Gossip and Push-Sum simulator
-%%% Failure Models:
-%%%   1. Node Crash Failures (permanent node death / crash)
-%%%   2. Transient Connection / Link Failures (packet / message drop)
-%%% Parameters:
-%%%   - FailureRate: float in [0.0, 1.0)
-%%%   - FailureType: node | connection
-%%% ====================================================================
+% Project 2 Bonus: Fault-Tolerant Gossip & Push-Sum Simulator
+% COP5612 / COP5615 - Fall 2026
+% Authors: Danush & Vignesh
 
 -module(project2_bonus).
 -export([main/1, start/5, measure_running_time/1, round_nodes/2]).
@@ -61,34 +53,35 @@ measure_running_time(Fun) ->
 start(NumNodes, Topology, Algorithm, FailureRate, FailureType) ->
     ActualNodes = round_nodes(NumNodes, Topology),
     Master = self(),
-    
-    %% Determine which nodes will fail for node failure model
+
+    % Select nodes to fail for node failure model (node 1 stays alive to initiate)
     FailedSet = case FailureType of
         node ->
             NumFailed = round(ActualNodes * FailureRate),
-            %% First node should not be failed to allow protocol start
             Eligible = lists:seq(2, ActualNodes),
             Shuffled = shuffle(Eligible),
             sets:from_list(lists:sublist(Shuffled, NumFailed));
         _ ->
             sets:new()
     end,
-    
-    Pids = spawn_actors(ActualNodes, Algorithm, Master, FailedSet, FailureRate, FailureType),
+
+    ConnDrop = case FailureType of
+        connection -> FailureRate;
+        _          -> 0.0
+    end,
+
+    Pids = spawn_actors(ActualNodes, Algorithm, Master, FailedSet, ConnDrop),
     PidTuple = list_to_tuple(Pids),
     setup_topology(Topology, ActualNodes, Pids, PidTuple),
-    
+
     AliveCount = ActualNodes - sets:size(FailedSet),
-    
-    %% Initiate algorithm from node 1
     start_algorithm(Algorithm, Pids),
-    
-    %% Wait for convergence
-    Res = wait_convergence(Algorithm, AliveCount, ActualNodes, 0),
+
+    Res = wait_convergence(AliveCount, ActualNodes, 0),
     [Pid ! stop || Pid <- Pids],
     Res.
 
-%% Parse command line arguments
+% Argument parser with defaults
 parse_args([NumNodesStr, TopoStr, AlgoStr]) ->
     parse_args([NumNodesStr, TopoStr, AlgoStr, "0.1", "node"]);
 parse_args([NumNodesStr, TopoStr, AlgoStr, FailRateStr]) ->
@@ -101,18 +94,18 @@ parse_args([NumNodesStr, TopoStr, AlgoStr, FailRateStr, FailTypeStr]) ->
             true ->
                 Topo = parse_topology(TopoStr),
                 Algo = parse_algorithm(AlgoStr),
-                FailType = parse_failure_type(FailTypeStr),
-                case {Topo, Algo, FailType} of
+                FType = parse_failure_type(FailTypeStr),
+                case {Topo, Algo, FType} of
                     {error, _, _} -> {error, "Invalid topology. Choose: full, 2D, line, imp2D"};
                     {_, error, _} -> {error, "Invalid algorithm. Choose: gossip, push-sum"};
                     {_, _, error} -> {error, "Invalid failureType. Choose: node, connection"};
-                    _ -> {ok, NumNodes, Topo, Algo, FailRate, FailType}
+                    _ -> {ok, NumNodes, Topo, Algo, FailRate, FType}
                 end;
             false ->
-                {error, "numNodes must be > 0 and failureRate must be between 0.0 and 1.0"}
+                {error, "numNodes must be > 0 and failureRate in [0.0, 1.0)"}
         end
     catch
-        _:_ -> {error, "Invalid arguments format"}
+        _:_ -> {error, "Invalid numeric arguments"}
     end;
 parse_args(_) ->
     {error, "Incorrect number of arguments"}.
@@ -120,33 +113,32 @@ parse_args(_) ->
 list_to_float_or_int(Str) ->
     case string:to_float(Str) of
         {error, no_float} -> float(list_to_integer(Str));
-        {FloatVal, _Rest} -> FloatVal
+        {Float, _Rest}    -> Float
     end.
 
 parse_topology(Str) ->
     case string:to_lower(Str) of
-        "full" -> full;
-        "2d" -> '2D';
-        "line" -> line;
+        "full"  -> full;
+        "2d"    -> '2D';
+        "line"  -> line;
         "imp2d" -> imp2D;
-        _ -> error
+        _       -> error
     end.
 
 parse_algorithm(Str) ->
     case string:to_lower(Str) of
-        "gossip" -> gossip;
+        "gossip"   -> gossip;
         "push-sum" -> 'push-sum';
-        "pushsum" -> 'push-sum';
-        _ -> error
+        "pushsum"  -> 'push-sum';
+        _          -> error
     end.
 
 parse_failure_type(Str) ->
     case string:to_lower(Str) of
-        "node" -> node;
+        "node"       -> node;
         "connection" -> connection;
-        "conn" -> connection;
-        "link" -> connection;
-        _ -> error
+        "conn"       -> connection;
+        _            -> error
     end.
 
 round_nodes(N, Topo) when Topo =:= '2D'; Topo =:= imp2D ->
@@ -158,24 +150,31 @@ round_nodes(N, _Topo) ->
 shuffle(List) ->
     [X || {_, X} <- lists:sort([{rand:uniform(), Item} || Item <- List])].
 
-%% ====================================================================
-%% TOPOLOGY GENERATION & SETUP
-%% ====================================================================
-spawn_actors(N, gossip, Master, FailedSet, DropRate, FailType) ->
-    [spawn(fun() ->
+% Spawn actors
+spawn_actors(N, gossip, Master, FailedSet, ConnDrop) ->
+    [begin
         IsDead = sets:is_element(I, FailedSet),
-        ConnDrop = case FailType of connection -> DropRate; _ -> 0.0 end,
-        gossip_init(Master, IsDead, ConnDrop)
-    end) || I <- lists:seq(1, N)];
-spawn_actors(N, 'push-sum', Master, FailedSet, DropRate, FailType) ->
-    [spawn(fun() ->
+        spawn(fun() -> gossip_init(Master, IsDead, ConnDrop) end)
+    end || I <- lists:seq(1, N)];
+spawn_actors(N, 'push-sum', Master, FailedSet, ConnDrop) ->
+    [begin
         IsDead = sets:is_element(I, FailedSet),
-        ConnDrop = case FailType of connection -> DropRate; _ -> 0.0 end,
-        push_sum_init(I, Master, IsDead, ConnDrop)
-    end) || I <- lists:seq(1, N)].
+        spawn(fun() -> push_sum_init(Master, I, IsDead, ConnDrop) end)
+    end || I <- lists:seq(1, N)].
 
-setup_topology(full, N, Pids, PidTuple) ->
-    [Pid ! {setup_full, N, I, PidTuple} || {I, Pid} <- lists:zip(lists:seq(1, N), Pids)];
+% grid coordinate neighbors helper (up, down, left, right)
+grid_indices(I, S) ->
+    R = (I - 1) div S,
+    C = (I - 1) rem S,
+    [ (R-1)*S + C + 1 || R > 0 ] ++
+    [ (R+1)*S + C + 1 || R < S - 1 ] ++
+    [ R*S + (C-1) + 1 || C > 0 ] ++
+    [ R*S + (C+1) + 1 || C < S - 1 ].
+
+% Topology setup
+setup_topology(full, _N, Pids, PidTuple) ->
+    [Pid ! {setup, {full, PidTuple, I}} || {I, Pid} <- lists:zip(lists:seq(1, length(Pids)), Pids)];
+
 setup_topology(line, N, Pids, PidTuple) ->
     [begin
         Neighbors = case I of
@@ -185,296 +184,156 @@ setup_topology(line, N, Pids, PidTuple) ->
         end,
         Pid ! {setup, list_to_tuple(Neighbors)}
     end || {I, Pid} <- lists:zip(lists:seq(1, N), Pids)];
+
 setup_topology('2D', N, Pids, PidTuple) ->
     S = ceil(math:sqrt(N)),
-    [begin
-        R = (I - 1) div S,
-        C = (I - 1) rem S,
-        Neighbors = [
-            element((R-1)*S + C + 1, PidTuple) || R > 0
-        ] ++ [
-            element((R+1)*S + C + 1, PidTuple) || R < S - 1
-        ] ++ [
-            element(R*S + (C-1) + 1, PidTuple) || C > 0
-        ] ++ [
-            element(R*S + (C+1) + 1, PidTuple) || C < S - 1
-        ],
-        Pid ! {setup, list_to_tuple(Neighbors)}
-    end || {I, Pid} <- lists:zip(lists:seq(1, N), Pids)];
+    [Pid ! {setup, list_to_tuple([element(X, PidTuple) || X <- grid_indices(I, S)])}
+     || {I, Pid} <- lists:zip(lists:seq(1, N), Pids)];
+
 setup_topology(imp2D, N, Pids, PidTuple) ->
     S = ceil(math:sqrt(N)),
     [begin
-        R = (I - 1) div S,
-        C = (I - 1) rem S,
-        GridIndices = [
-            (R-1)*S + C + 1 || R > 0
-        ] ++ [
-            (R+1)*S + C + 1 || R < S - 1
-        ] ++ [
-            R*S + (C-1) + 1 || C > 0
-        ] ++ [
-            R*S + (C+1) + 1 || C < S - 1
-        ],
-        RandIdx = pick_random_excluding(I, GridIndices, N),
-        AllIndices = [RandIdx | GridIndices],
-        Neighbors = [element(Idx, PidTuple) || Idx <- AllIndices],
-        Pid ! {setup, list_to_tuple(Neighbors)}
+        Grid = grid_indices(I, S),
+        Rand = pick_shortcut(I, Grid, N),
+        Pid ! {setup, list_to_tuple([element(X, PidTuple) || X <- [Rand | Grid]])}
     end || {I, Pid} <- lists:zip(lists:seq(1, N), Pids)].
 
-pick_random_excluding(I, ExcludeList, N) ->
-    Candidate = rand:uniform(N),
-    case Candidate =:= I orelse lists:member(Candidate, ExcludeList) of
-        true -> pick_random_excluding(I, ExcludeList, N);
-        false -> Candidate
+pick_shortcut(I, Excluded, N) ->
+    Pick = rand:uniform(N),
+    case Pick =:= I orelse lists:member(Pick, Excluded) of
+        true  -> pick_shortcut(I, Excluded, N);
+        false -> Pick
     end.
 
 start_algorithm(gossip, Pids) ->
-    hd(Pids) ! {rumor, "UF_GOSSIP_FACT"};
+    hd(Pids) ! {rumor, "rumor"};
 start_algorithm('push-sum', Pids) ->
     hd(Pids) ! {start}.
 
-%% ====================================================================
-%% FAULT-AWARE GOSSIP ACTOR
-%% ====================================================================
-gossip_init(Master, IsDead, ConnDrop) ->
-    receive
-        {setup, NeighborTuple} ->
-            case IsDead of
-                true -> dead_loop();
-                false -> gossip_loop(Master, NeighborTuple, 0, ConnDrop, undefined)
-            end;
-        {setup_full, N, MyIdx, PidTuple} ->
-            case IsDead of
-                true -> dead_loop();
-                false -> gossip_loop_full(Master, N, MyIdx, PidTuple, 0, ConnDrop, undefined)
-            end;
-        stop -> ok
+% Random sending with connection drop probability
+send_random({full, Pids, MyIdx}, Msg, ConnDrop) ->
+    case rand:uniform() < ConnDrop of
+        true  -> ok; % link failure: message dropped
+        false ->
+            Target = rand:uniform(tuple_size(Pids)),
+            case Target of
+                MyIdx -> send_random({full, Pids, MyIdx}, Msg, ConnDrop);
+                _     -> element(Target, Pids) ! Msg
+            end
+    end;
+send_random(Neighbors, Msg, ConnDrop) ->
+    case rand:uniform() < ConnDrop of
+        true  -> ok; % link failure: message dropped
+        false ->
+            case tuple_size(Neighbors) of
+                0 -> ok;
+                N -> element(rand:uniform(N), Neighbors) ! Msg
+            end
     end.
 
+% Dead actor loop: ignores all protocol messages
 dead_loop() ->
     receive
         stop -> ok;
-        _Ignored -> dead_loop()
+        _    -> dead_loop()
     end.
 
-gossip_loop(Master, NeighborTuple, HeardCount, ConnDrop, Rumor) ->
+% Fault-aware Gossip actor
+gossip_init(Master, IsDead, ConnDrop) ->
+    receive
+        {setup, Neighbors} ->
+            case IsDead of
+                true  -> dead_loop();
+                false -> gossip_loop(Master, Neighbors, 0, undefined, ConnDrop)
+            end;
+        stop -> ok
+    end.
+
+gossip_loop(Master, Neighbors, HeardCount, Rumor, ConnDrop) ->
     receive
         {rumor, Msg} ->
             case HeardCount of
                 0 ->
                     Master ! {heard, self()},
-                    send_tuple(NeighborTuple, {rumor, Msg}, ConnDrop),
+                    send_random(Neighbors, {rumor, Msg}, ConnDrop),
                     erlang:send_after(5, self(), tick),
-                    gossip_loop(Master, NeighborTuple, 1, ConnDrop, Msg);
+                    gossip_loop(Master, Neighbors, 1, Msg, ConnDrop);
                 Count when Count < 10 ->
-                    send_tuple(NeighborTuple, {rumor, Msg}, ConnDrop),
-                    gossip_loop(Master, NeighborTuple, Count + 1, ConnDrop, Msg);
+                    send_random(Neighbors, {rumor, Msg}, ConnDrop),
+                    gossip_loop(Master, Neighbors, Count + 1, Msg, ConnDrop);
                 Count ->
-                    gossip_loop(Master, NeighborTuple, Count + 1, ConnDrop, Msg)
+                    gossip_loop(Master, Neighbors, Count + 1, Msg, ConnDrop)
             end;
         tick ->
-            if
-                HeardCount < 10 ->
-                    send_tuple(NeighborTuple, {rumor, Rumor}, ConnDrop),
-                    erlang:send_after(5, self(), tick),
-                    gossip_loop(Master, NeighborTuple, HeardCount, ConnDrop, Rumor);
-                true ->
-                    gossip_loop(Master, NeighborTuple, HeardCount, ConnDrop, Rumor)
-            end;
+            if HeardCount < 10 ->
+                send_random(Neighbors, {rumor, Rumor}, ConnDrop),
+                erlang:send_after(5, self(), tick)
+            ; true -> ok
+            end,
+            gossip_loop(Master, Neighbors, HeardCount, Rumor, ConnDrop);
         stop -> ok
     end.
 
-gossip_loop_full(Master, N, MyIdx, PidTuple, HeardCount, ConnDrop, Rumor) ->
+% Fault-aware Push-Sum actor
+push_sum_init(Master, Index, IsDead, ConnDrop) ->
     receive
-        {rumor, Msg} ->
-            case HeardCount of
-                0 ->
-                    Master ! {heard, self()},
-                    send_full(N, MyIdx, PidTuple, {rumor, Msg}, ConnDrop),
-                    erlang:send_after(5, self(), tick),
-                    gossip_loop_full(Master, N, MyIdx, PidTuple, 1, ConnDrop, Msg);
-                Count when Count < 10 ->
-                    send_full(N, MyIdx, PidTuple, {rumor, Msg}, ConnDrop),
-                    gossip_loop_full(Master, N, MyIdx, PidTuple, Count + 1, ConnDrop, Msg);
-                Count ->
-                    gossip_loop_full(Master, N, MyIdx, PidTuple, Count + 1, ConnDrop, Msg)
-            end;
-        tick ->
-            if
-                HeardCount < 10 ->
-                    send_full(N, MyIdx, PidTuple, {rumor, Rumor}, ConnDrop),
-                    erlang:send_after(5, self(), tick),
-                    gossip_loop_full(Master, N, MyIdx, PidTuple, HeardCount, ConnDrop, Rumor);
-                true ->
-                    gossip_loop_full(Master, N, MyIdx, PidTuple, HeardCount, ConnDrop, Rumor)
+        {setup, Neighbors} ->
+            case IsDead of
+                true  -> dead_loop();
+                false -> push_sum_loop(Master, Neighbors, float(Index), 1.0, 0, float(Index), ConnDrop, false)
             end;
         stop -> ok
     end.
 
-send_tuple(NeighborTuple, Msg, ConnDrop) ->
-    case rand:uniform() < ConnDrop of
-        true -> ok; %% Link failure: message dropped
-        false ->
-            Size = tuple_size(NeighborTuple),
-            if
-                Size > 0 ->
-                    Idx = rand:uniform(Size),
-                    element(Idx, NeighborTuple) ! Msg;
-                true -> ok
-            end
-    end.
-
-send_full(N, MyIdx, PidTuple, Msg, ConnDrop) ->
-    case rand:uniform() < ConnDrop of
-        true -> ok; %% Link failure: message dropped
-        false ->
-            Target = rand:uniform(N),
-            if
-                Target =:= MyIdx -> send_full(N, MyIdx, PidTuple, Msg, ConnDrop);
-                true -> element(Target, PidTuple) ! Msg
-            end
-    end.
-
-%% ====================================================================
-%% FAULT-AWARE PUSH-SUM ACTOR
-%% ====================================================================
-push_sum_init(Index, Master, IsDead, ConnDrop) ->
-    receive
-        {setup, NeighborTuple} ->
-            case IsDead of
-                true -> dead_loop();
-                false -> push_sum_loop(float(Index), 1.0, 0, float(Index), NeighborTuple, Master, ConnDrop, false)
-            end;
-        {setup_full, N, MyIdx, PidTuple} ->
-            case IsDead of
-                true -> dead_loop();
-                false -> push_sum_loop_full(float(Index), 1.0, 0, float(Index), N, MyIdx, PidTuple, Master, ConnDrop, false)
-            end;
-        stop -> ok
-    end.
-
-push_sum_loop(S, W, Consecutive, PrevRatio, NeighborTuple, Master, ConnDrop, Terminated) ->
+push_sum_loop(Master, Neighbors, S, W, Consecutive, PrevRatio, ConnDrop, Terminated) ->
     receive
         {start} ->
-            HalfS = S / 2.0,
-            HalfW = W / 2.0,
-            send_tuple(NeighborTuple, {push_sum, HalfS, HalfW}, ConnDrop),
+            HalfS = S / 2.0, HalfW = W / 2.0,
+            send_random(Neighbors, {push_sum, HalfS, HalfW}, ConnDrop),
             erlang:send_after(5, self(), tick),
-            push_sum_loop(HalfS, HalfW, Consecutive, PrevRatio, NeighborTuple, Master, ConnDrop, Terminated);
-        {push_sum, S_in, W_in} ->
-            if
-                Terminated ->
-                    send_tuple(NeighborTuple, {push_sum, S_in, W_in}, ConnDrop),
-                    push_sum_loop(S, W, Consecutive, PrevRatio, NeighborTuple, Master, ConnDrop, true);
+            push_sum_loop(Master, Neighbors, HalfS, HalfW, Consecutive, PrevRatio, ConnDrop, Terminated);
+
+        {push_sum, Sin, Win} when Terminated ->
+            send_random(Neighbors, {push_sum, Sin, Win}, ConnDrop),
+            push_sum_loop(Master, Neighbors, S, W, Consecutive, PrevRatio, ConnDrop, true);
+
+        {push_sum, Sin, Win} ->
+            NewS = S + Sin,
+            NewW = W + Win,
+            Ratio = NewS / NewW,
+            NewConsecutive = case abs(Ratio - PrevRatio) < 1.0e-10 of
+                true  -> Consecutive + 1;
+                false -> 0
+            end,
+            HalfS = NewS / 2.0,
+            HalfW = NewW / 2.0,
+            send_random(Neighbors, {push_sum, HalfS, HalfW}, ConnDrop),
+            case NewConsecutive >= 3 of
                 true ->
-                    NewS = S + S_in,
-                    NewW = W + W_in,
-                    NewRatio = NewS / NewW,
-                    Diff = abs(NewRatio - PrevRatio),
-                    NewConsecutive = if
-                        Diff < 1.0e-10 -> Consecutive + 1;
-                        true -> 0
-                    end,
-                    HalfS = NewS / 2.0,
-                    HalfW = NewW / 2.0,
-                    if
-                        NewConsecutive >= 3 ->
-                            Master ! {converged, self(), NewRatio},
-                            send_tuple(NeighborTuple, {push_sum, HalfS, HalfW}, ConnDrop),
-                            push_sum_loop(HalfS, HalfW, NewConsecutive, NewRatio, NeighborTuple, Master, ConnDrop, true);
-                        true ->
-                            send_tuple(NeighborTuple, {push_sum, HalfS, HalfW}, ConnDrop),
-                            push_sum_loop(HalfS, HalfW, NewConsecutive, NewRatio, NeighborTuple, Master, ConnDrop, false)
-                    end
+                    Master ! {converged, self(), Ratio},
+                    push_sum_loop(Master, Neighbors, HalfS, HalfW, NewConsecutive, Ratio, ConnDrop, true);
+                false ->
+                    push_sum_loop(Master, Neighbors, HalfS, HalfW, NewConsecutive, Ratio, ConnDrop, false)
             end;
+
+        tick when not Terminated ->
+            HalfS = S / 2.0, HalfW = W / 2.0,
+            send_random(Neighbors, {push_sum, HalfS, HalfW}, ConnDrop),
+            erlang:send_after(5, self(), tick),
+            push_sum_loop(Master, Neighbors, HalfS, HalfW, Consecutive, PrevRatio, ConnDrop, false);
         tick ->
-            if
-                not Terminated ->
-                    HalfS = S / 2.0,
-                    HalfW = W / 2.0,
-                    send_tuple(NeighborTuple, {push_sum, HalfS, HalfW}, ConnDrop),
-                    erlang:send_after(5, self(), tick),
-                    push_sum_loop(HalfS, HalfW, Consecutive, PrevRatio, NeighborTuple, Master, ConnDrop, Terminated);
-                true ->
-                    push_sum_loop(S, W, Consecutive, PrevRatio, NeighborTuple, Master, ConnDrop, Terminated)
-            end;
+            push_sum_loop(Master, Neighbors, S, W, Consecutive, PrevRatio, ConnDrop, true);
+
         stop -> ok
     end.
 
-push_sum_loop_full(S, W, Consecutive, PrevRatio, N, MyIdx, PidTuple, Master, ConnDrop, Terminated) ->
+% Convergence tracking with guards
+wait_convergence(Target, Total, Count) when Count >= Target ->
+    {ok, Target, Total, Count};
+wait_convergence(Target, Total, Count) ->
     receive
-        {start} ->
-            HalfS = S / 2.0,
-            HalfW = W / 2.0,
-            send_full(N, MyIdx, PidTuple, {push_sum, HalfS, HalfW}, ConnDrop),
-            erlang:send_after(5, self(), tick),
-            push_sum_loop_full(HalfS, HalfW, Consecutive, PrevRatio, N, MyIdx, PidTuple, Master, ConnDrop, Terminated);
-        {push_sum, S_in, W_in} ->
-            if
-                Terminated ->
-                    send_full(N, MyIdx, PidTuple, {push_sum, S_in, W_in}, ConnDrop),
-                    push_sum_loop_full(S, W, Consecutive, PrevRatio, N, MyIdx, PidTuple, Master, ConnDrop, true);
-                true ->
-                    NewS = S + S_in,
-                    NewW = W + W_in,
-                    NewRatio = NewS / NewW,
-                    Diff = abs(NewRatio - PrevRatio),
-                    NewConsecutive = if
-                        Diff < 1.0e-10 -> Consecutive + 1;
-                        true -> 0
-                    end,
-                    HalfS = NewS / 2.0,
-                    HalfW = NewW / 2.0,
-                    if
-                        NewConsecutive >= 3 ->
-                            Master ! {converged, self(), NewRatio},
-                            send_full(N, MyIdx, PidTuple, {push_sum, HalfS, HalfW}, ConnDrop),
-                            push_sum_loop_full(HalfS, HalfW, NewConsecutive, NewRatio, N, MyIdx, PidTuple, Master, ConnDrop, true);
-                        true ->
-                            send_full(N, MyIdx, PidTuple, {push_sum, HalfS, HalfW}, ConnDrop),
-                            push_sum_loop_full(HalfS, HalfW, NewConsecutive, NewRatio, N, MyIdx, PidTuple, Master, ConnDrop, false)
-                    end
-            end;
-        tick ->
-            if
-                not Terminated ->
-                    HalfS = S / 2.0,
-                    HalfW = W / 2.0,
-                    send_full(N, MyIdx, PidTuple, {push_sum, HalfS, HalfW}, ConnDrop),
-                    erlang:send_after(5, self(), tick),
-                    push_sum_loop_full(HalfS, HalfW, Consecutive, PrevRatio, N, MyIdx, PidTuple, Master, ConnDrop, Terminated);
-                true ->
-                    push_sum_loop_full(S, W, Consecutive, PrevRatio, N, MyIdx, PidTuple, Master, ConnDrop, Terminated)
-            end;
-        stop -> ok
-    end.
-
-%% ====================================================================
-%% CONVERGENCE TRACKING
-%% ====================================================================
-wait_convergence(gossip, AliveCount, TotalNodes, Heard) ->
-    receive
-        {heard, _Pid} ->
-            NewHeard = Heard + 1,
-            if
-                NewHeard >= AliveCount ->
-                    {ok, AliveCount, TotalNodes, NewHeard};
-                true ->
-                    wait_convergence(gossip, AliveCount, TotalNodes, NewHeard)
-            end
+        {heard, _Pid}             -> wait_convergence(Target, Total, Count + 1);
+        {converged, _Pid, _Ratio} -> wait_convergence(Target, Total, Count + 1)
     after 2500 ->
-        {timeout, Heard, AliveCount, TotalNodes}
-    end;
-wait_convergence('push-sum', AliveCount, TotalNodes, Converged) ->
-    receive
-        {converged, _Pid, _Ratio} ->
-            NewConverged = Converged + 1,
-            if
-                NewConverged >= AliveCount ->
-                    {ok, AliveCount, TotalNodes, NewConverged};
-                true ->
-                    wait_convergence('push-sum', AliveCount, TotalNodes, NewConverged)
-            end
-    after 2500 ->
-        {timeout, Converged, AliveCount, TotalNodes}
+        {timeout, Count, Target, Total}
     end.
