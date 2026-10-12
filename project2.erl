@@ -1,6 +1,6 @@
 % Project 2: Gossip & Push-Sum Simulator
 % COP5612 / COP5615 - Fall 2026
-% Authors: Danush & Vignesh
+% Authors: Danush (UFID: 47244992) & Vignesh (UFID: 52658963)
 
 -module(project2).
 -export([main/1, start/3, measure_running_time/1, round_nodes/2]).

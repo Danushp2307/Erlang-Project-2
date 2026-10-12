@@ -1,6 +1,6 @@
 % Project 2 Bonus: Fault-Tolerant Gossip & Push-Sum Simulator
 % COP5612 / COP5615 - Fall 2026
-% Authors: Danush & Vignesh
+% Authors: Danush (UFID: 47244992) & Vignesh (UFID: 52658963)
 
 -module(project2_bonus).
 -export([main/1, start/5, measure_running_time/1, round_nodes/2]).
@@ -54,11 +54,11 @@ start(NumNodes, Topology, Algorithm, FailureRate, FailureType) ->
     ActualNodes = round_nodes(NumNodes, Topology),
     Master = self(),
 
-    % Select nodes to fail for node failure model (node 1 stays alive to initiate)
+    % Select nodes to fail for node failure model (nodes 1 and 2 stay alive so rumor can enter the network)
     FailedSet = case FailureType of
         node ->
             NumFailed = round(ActualNodes * FailureRate),
-            Eligible = lists:seq(2, ActualNodes),
+            Eligible = lists:seq(3, ActualNodes),
             Shuffled = shuffle(Eligible),
             sets:from_list(lists:sublist(Shuffled, NumFailed));
         _ ->
